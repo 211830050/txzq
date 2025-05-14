@@ -277,11 +277,12 @@ def train(config):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--input_images_path', type=str,
-                        default="D:/86178/Documents/zqtx/pythonProject5/backup/dataset/train/input/",
-                        help='path of input images')
+                    default="./dataset/train/input/",
+                    help='path of input images')
     parser.add_argument('--label_images_path', type=str,
-                        default="D:/86178/Documents/zqtx/pythonProject5/backup/dataset/train/label/",
-                        help='path of label images')
+                    default="./dataset/train/label/",
+                    help='path of label images')
+
     parser.add_argument('--lr', type=float, default=0.0002)
     parser.add_argument('--decay_rate', type=float, default=0.7)
     parser.add_argument('--step_size', type=int, default=400)
