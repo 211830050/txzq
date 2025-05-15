@@ -1,307 +1,343 @@
+#
+# import os
+# import argparse
+# import numpy as np
+# from tqdm import tqdm
+#
 # import torch
 # import torch.nn as nn
 # import torch.optim as optim
 # from torch.optim import lr_scheduler
-# import numpy as np
 # import torchvision
 # from torchvision import transforms
-# # import matplotlib.pyplot as plt
-# import time
-# import os
-# import copy
-# from model import Edge_Detector, Res_Block, UResNet_P
-# import argparse
+# from torch.utils.data import DataLoader, Subset
+#
+# from skimage.metrics import peak_signal_noise_ratio as psnr
+#
+# from model import UResNet_P, Edge_Detector
 # from dataloader import TrainDataSet
 #
+# torch.backends.cudnn.benchmark = True
+#
 # def train(config):
-#     weight = 1.0
-#     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+#     # 1. 设备
+#     device = torch.device(f"cuda:{config.cuda_id}"
+#                           if torch.cuda.is_available() else "cpu")
 #     print("Using device:", device)
+#
+#     # 2. 模型与优化器
 #     model = UResNet_P().to(device)
-#     for param in model.edge_detector.parameters():
-#         param.requires_grad = False
+#     # 冻结 edge detector，仅用于 loss 计算
 #     edge_detector = Edge_Detector().to(device)
-#     for param in edge_detector.parameters():
-#         param.requires_grad = False
+#     for p in edge_detector.parameters():
+#         p.requires_grad = False
 #
 #     if config.loss_type == 'MSE':
 #         criterion = nn.MSELoss().to(device)
-#     if config.loss_type == 'L1':
-#         criterion == nn.L1Loss().to(device)
+#     else:  # 'L1'
+#         criterion = nn.L1Loss().to(device)
 #
 #     optimizer = optim.Adam(model.parameters(), lr=config.lr)
-#     if config.train_mode == 'N' or 'P-S':
-#     	scheduler = lr_scheduler.StepLR(optimizer,step_size=config.step_size,gamma=config.decay_rate)
-#     if config.train_mode == 'P-A':
-#     	scheduler = lr_scheduler.StepLR(optimizer,step_size=2*config.step_size,gamma=config.decay_rate)
+#     scheduler = lr_scheduler.StepLR(
+#         optimizer,
+#         step_size=config.step_size,
+#         gamma=config.decay_rate
+#     )
 #
-#     transform_list = [transforms.Resize((config.resize, config.resize)), transforms.ToTensor()]
-#     tsfms = transforms.Compose(transform_list)
-#     train_dataset = TrainDataSet(config.input_images_path, config.label_images_path, tsfms)
-#     train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=config.batch_size, shuffle=False)
-#     img_loss_lst = []
-#     edge_loss_lst = []
-#     total_loss_lst = []
-#     for epoch in range(config.num_epochs):
-#         img_loss_tmp = []
-#         edge_loss_tmp = []
-#         total_loss_tmp = []
-#         if epoch > 1 and epoch % config.step_size == 0:
-#             for param_group in optimizer.param_groups:
-#                 param_group['lr'] = param_group['lr'] * 0.7
+#     # 3. 数据预处理
+#     tsfms = transforms.Compose([
+#         transforms.Resize((config.resize, config.resize)),
+#         transforms.ToTensor()
+#     ])
 #
-#         for input_img, label_img in train_dataloader:
-#             input_img = input_img.to(device)
-#             label_img = label_img.to(device)
+#     # 4. 训练集 & 验证集
+#     train_dataset = TrainDataSet(
+#         config.input_images_path,
+#         config.label_images_path,
+#         tsfms
+#     )
+#     val_dataset = TrainDataSet(
+#         config.val_input_path,
+#         config.val_label_path,
+#         tsfms
+#     )
 #
-#             if config.train_mode == 'N':
-#                 model.zero_grad()
-#                 generate_img, edge_map = model(input_img)
-#                 loss = criterion(generate_img, label_img)
-#                 img_loss_tmp.append(loss.item())
-#                 loss.backward()
-#                 optimizer.step()
+#     # 可选快速 smoke 测试
+#     if config.smoke_test:
+#         subset = min(config.smoke_size, len(train_dataset))
+#         train_dataset = Subset(train_dataset, list(range(subset)))
+#         print(f"Smoke test mode: using first {subset} samples")
 #
-#             if config.train_mode == 'P-A':
+#     train_loader = DataLoader(
+#         train_dataset,
+#         batch_size=config.batch_size,
+#         shuffle=True,
+#         num_workers=config.num_workers,
+#         pin_memory=True
+#     )
+#     val_loader = DataLoader(
+#         val_dataset,
+#         batch_size=config.batch_size,
+#         shuffle=False,
+#         num_workers=config.num_workers,
+#         pin_memory=True
+#     )
 #
-#                 for flag in range(2):
-#                     model.zero_grad()
-#                     generate_img, edge_map = model(input_img)
-#                     if flag == 0:
-#                         edge_label = edge_detector(label_img)
-#                         edge_loss = criterion(edge_map, edge_label)
-#                         edge_loss.backward()
-#                     if flag == 1:
-#                         img_loss = criterion(generate_img, label_img)
-#                         img_loss.backward()
+#     # 5. 训练 + 验证循环
+#     for epoch in range(1, config.num_epochs + 1):
+#         model.train()
+#         loop = tqdm(train_loader, desc=f"Epoch {epoch}/{config.num_epochs}")
+#         for inp, gt in loop:
+#             inp, gt = inp.to(device), gt.to(device)
 #
-#                     scheduler.step()
-#             if config.train_mode == 'P-S':
-#                 model.zero_grad()
-#                 generate_img, edge_map = model(input_img)
-#                 img_loss = criterion(generate_img, label_img)
-#                 edge_label = edge_detector(label_img)
-#                 edge_loss = criterion(edge_map, edge_label)
-#                 loss = img_loss + weight * edge_label
-#                 total_loss_tmp.append(loss.item())
-#                 loss.backward()
+#             optimizer.zero_grad()
+#             pred, edge_map = model(inp)
+#             # 网络内部已 sigmoid，直接 clamp
+#             pred = torch.clamp(pred, 0, 1)
 #
-#         if config.train_mode == 'N':
-#             img_loss_lst.append(np.mean(img_loss_tmp))
+#             img_loss  = criterion(pred, gt)
+#             edge_tgt  = edge_detector(gt)
+#             edge_loss = criterion(edge_map, edge_tgt)
 #
-#         if config.train_mode == 'P-S':
-#             total_loss_lst.append(np.mean(total_loss_tmp))
+#             if config.train_mode in ['P-S', 'P-A']:
+#                 loss = img_loss + config.edge_weight * edge_loss
+#             else:
+#                 loss = img_loss
 #
-#         if config.train_mode == 'P-A':
-#             img_loss_lst.append(np.mean(img_loss_tmp))
-#             edge_loss_lst.append(np.mean(edge_loss_tmp))
+#             loss.backward()
+#             optimizer.step()
+#             loop.set_postfix(loss=f"{loss.item():.4f}")
 #
-#         if epoch % config.print_freq == 0:
-#             if config.train_mode == 'N':
-#                 print('epoch:[{}]/[{}], image loss:{}'.format(epoch, config.num_epochs, str(img_loss_lst[epoch])))
-#             if config.train_mode == 'P-A':
-#                 print('epoch:[{}]/[{}], image loss:{},edge difference loss:{}'.format(epoch, config.num_epochs,
-#                                                                                       str(img_loss_lst[epoch]),
-#                                                                                       str(edge_loss_lst[epoch])))
-#             if config.train_mode == 'P-S':
-#                 print('epoch:[{}]/[{}], total loss:{}'.format(epoch, config.num_epochs, str(total_loss_lst[epoch])))
-#         if not os.path.exists(config.snapshots_folder):
-#             os.mkdir(config.snapshots_folder)
+#         scheduler.step()
 #
+#         # —— 验证 ——
+#         model.eval()
+#         psnr_vals = []
+#         with torch.no_grad():
+#             for inp, gt in val_loader:
+#                 inp, gt = inp.to(device), gt.to(device)
+#                 pred, _ = model(inp)
+#                 pred = torch.clamp(pred, 0, 1)
+#
+#                 # 逐张计算 PSNR
+#                 for b in range(pred.size(0)):
+#                     pr = pred[b].cpu().permute(1,2,0).numpy()
+#                     gr = gt[b].cpu().permute(1,2,0).numpy()
+#                     psnr_vals.append(psnr(gr, pr, data_range=1))
+#
+#         avg_psnr = np.mean(psnr_vals)
+#         print(f"[Epoch {epoch}] Validation PSNR: {avg_psnr:.2f} dB")
+#
+#         # —— 保存模型 ——
 #         if epoch % config.snapshot_freq == 0:
-#             torch.save(model, config.snapshots_folder + 'model_epoch_{}.ckpt'.format(epoch))
+#             os.makedirs(config.snapshots_folder, exist_ok=True)
+#             ckpt_path = os.path.join(
+#                 config.snapshots_folder,
+#                 f"model_epoch_{epoch}.ckpt"
+#             )
+#             torch.save(model.state_dict(), ckpt_path)
+#             print(f"Saved checkpoint: {ckpt_path}")
 #
+#     print("Training complete.")
 #
 # if __name__ == "__main__":
 #     parser = argparse.ArgumentParser()
 #
-#     # Input Parameters
-#     # parser.add_argument('--input_images_path', type=str, default="./data/input/",
-#     #                     help='path of input images(underwater images) default:./data/input/')
-#     # parser.add_argument('--label_images_path', type=str, default="./data/label/",
-#     #                     help='path of label images(clear images) default:./data/label/')
-#     # parser.add_argument('--input_images_path', type=str,
-#     #                     default=r"D:\86178\Documents\zqtx\pythonProject5\backup\dataset\train\input",
-#     #                     help='path of input images (underwater images)')
-#     #
-#     # parser.add_argument('--label_images_path', type=str,
-#     #                     default=r"D:\86178\Documents\zqtx\pythonProject5\backup\dataset\train\label",
-#     #                     help='path of label images (clear images)')
-#
-#
+#     # 数据路径
 #     parser.add_argument('--input_images_path', type=str,
-#                         default="D:/86178/Documents/zqtx/pythonProject5/backup/dataset/train/input/",
-#                         help='path of input images (underwater images)')
-#
+#                         default='./dataset/train/input/',
+#                         help='训练集输入图像路径')
 #     parser.add_argument('--label_images_path', type=str,
-#                         default="D:/86178/Documents/zqtx/pythonProject5/backup/dataset/train/label/",
-#                         help='path of label images (clear images)')
+#                         default='./dataset/train/label/',
+#                         help='训练集标签图像路径')
+#     parser.add_argument('--val_input_path', type=str,
+#                         default='./dataset/val/input/',
+#                         help='验证集输入图像路径')
+#     parser.add_argument('--val_label_path', type=str,
+#                         default='./dataset/val/label/',
+#                         help='验证集标签图像路径')
 #
-#     parser.add_argument('--lr', type=float, default=0.0002)
-#     parser.add_argument('--decay_rate', type=float, default=0.7, help='Learning rate decay default: 0.7')
-#     parser.add_argument('--step_size', type=int, default=400, help="Period of learning rate decay")
-#     parser.add_argument('--loss_type', type=str, default="MSE", help="loss type to train model, L1 or MSE default: MSE")
-#     parser.add_argument('--num_epochs', type=int, default=2000)
-#     parser.add_argument('--train_mode', type=str, default="P-A",
-#                         help="N for UResNet;P-S for URseNet-P-S;P-A for UResnet-P-S. default:N")
-#     parser.add_argument('--batch_size', type=int, default=1, help="default : 1")
-#     parser.add_argument('--resize', type=int, default=256, help="resize images, default:resize images to 256*256")
-#     parser.add_argument('--cuda_id', type=int, default=0, help="id of cuda device,default:0")
-#     parser.add_argument('--print_freq', type=int, default=1)
-#     parser.add_argument('--snapshot_freq', type=int, default=50)
-#     parser.add_argument('--snapshots_folder', type=str, default="./snapshots/")
-#     # parser.add_argument('--sample_output_folder', type=str, default="samples/")
+#     # 超参数
+#     parser.add_argument('--lr', type=float, default=2e-4,
+#                         help='初始学习率')
+#     parser.add_argument('--decay_rate', type=float, default=0.8,
+#                         help='学习率衰减率')
+#     parser.add_argument('--step_size', type=int, default=31,
+#                         help='学习率衰减步长（epoch）')
+#     parser.add_argument('--loss_type', type=str, default='MSE',
+#                         choices=['MSE','L1'],
+#                         help='主损失类型')
+#     parser.add_argument('--num_epochs', type=int, default=620,
+#                         help='训练总 epoch 数')
+#     parser.add_argument('--train_mode', type=str,
+#                         default='P-A',
+#                         choices=['N','P-S','P-A'],
+#                         help="训练模式：'N','P-S' 或 'P-A'")
+#     parser.add_argument('--edge_weight', type=float, default=1.2,
+#                         help='边缘损失权重')
+#
+#     # 其它配置
+#     parser.add_argument('--batch_size', type=int, default=8)
+#     parser.add_argument('--resize', type=int, default=256,
+#                         help='Resize 大小')
+#     parser.add_argument('--cuda_id', type=int, default=0)
+#     parser.add_argument('--snapshot_freq', type=int, default=31,
+#                         help='多少 epoch 保存一次模型')
+#     parser.add_argument('--snapshots_folder', type=str, default='./snapshots/',
+#                         help='模型保存目录')
+#     parser.add_argument('--num_workers', type=int, default=16)
+#     parser.add_argument('--smoke_test', action='store_true',
+#                         help='快速 smoke 测试模式')
+#     parser.add_argument('--smoke_size', type=int, default=500,
+#                         help='smoke 测试子集大小')
 #
 #     config = parser.parse_args()
-#
-#     # if not os.path.exists(config.snapshots_folder):
-#     #     os.mkdir(config.snapshots_folder)
-#     # if not os.path.exists(config.sample_output_folder):
-#     #     os.mkdir(config.sample_output_folder)
-#
 #     train(config)
-#
-#
-#
-#
-#
-#
 
+
+import os
+import argparse
+import numpy as np
+from tqdm import tqdm
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.optim import lr_scheduler
-import numpy as np
 import torchvision
 from torchvision import transforms
-import os
-from model import Edge_Detector, UResNet_P
-import argparse
-from dataloader import TrainDataSet
 from torch.utils.data import DataLoader, Subset
-from tqdm import tqdm
+from torch.nn import functional as F
 
-# Enable cuDNN auto-tuner
+from model import UResNet_P, Edge_Detector
+from dataloader import TrainDataSet
+
+# 保持 cudnn 高效
 torch.backends.cudnn.benchmark = True
 
 def train(config):
-    print(torch.cuda.is_available(), torch.cuda.get_device_name(0))
-    weight = config.edge_weight
     device = torch.device(f"cuda:{config.cuda_id}" if torch.cuda.is_available() else "cpu")
     print("Using device:", device)
 
-    # Model and edge detector
+    # 模型和边缘检测器
     model = UResNet_P().to(device)
-    for param in model.edge_detector.parameters():
-        param.requires_grad = False
     edge_detector = Edge_Detector().to(device)
-    for param in edge_detector.parameters():
-        param.requires_grad = False
+    for p in edge_detector.parameters():
+        p.requires_grad = False
 
-    # Loss function
-    if config.loss_type == 'MSE':
-        criterion = nn.MSELoss().to(device)
-    elif config.loss_type == 'L1':
-        criterion = nn.L1Loss().to(device)
-    else:
-        raise ValueError("Unsupported loss type")
-
-    # Optimizer and scheduler
+    # 损失与优化器
+    criterion = nn.MSELoss().to(device) if config.loss_type == 'MSE' else nn.L1Loss().to(device)
     optimizer = optim.Adam(model.parameters(), lr=config.lr)
-    if config.train_mode in ['N', 'P-S']:
-        scheduler = lr_scheduler.StepLR(optimizer, step_size=config.step_size, gamma=config.decay_rate)
-    elif config.train_mode == 'P-A':
-        scheduler = lr_scheduler.StepLR(optimizer, step_size=2 * config.step_size, gamma=config.decay_rate)
-    else:
-        raise ValueError("Unsupported train mode")
+    scheduler = lr_scheduler.StepLR(optimizer, step_size=config.step_size, gamma=config.decay_rate)
 
-    # Data transforms and dataset
-    transform_list = [transforms.Resize((config.resize, config.resize)), transforms.ToTensor()]
-    tsfms = transforms.Compose(transform_list)
-    train_dataset = TrainDataSet(config.input_images_path, config.label_images_path, tsfms)
+    # 数据增广 + 转换
+    tsfms = transforms.Compose([
+        transforms.Resize((config.resize, config.resize)),
+        transforms.RandomHorizontalFlip(),
+        transforms.RandomVerticalFlip(),
+        transforms.RandomRotation(15),
+        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1),
+        transforms.ToTensor()
+    ])
 
-    # Optional smoke test subset
+    # 训练/验证集加载
+    train_ds = TrainDataSet(config.input_images_path, config.label_images_path, tsfms)
+    val_ds   = TrainDataSet(config.val_input_path,     config.val_label_path,     tsfms)
+
     if config.smoke_test:
-        subset_size = min(config.smoke_size, len(train_dataset))
-        train_dataset = Subset(train_dataset, list(range(subset_size)))
-        print(f"Smoke test mode: using first {subset_size} samples")
+        subset = min(config.smoke_size, len(train_ds))
+        train_ds = Subset(train_ds, list(range(subset)))
+        print(f"Smoke test: using {subset} samples")
 
-    # DataLoader with parallel loading
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=config.batch_size,
-        shuffle=True,
-        num_workers=config.num_workers,
-        pin_memory=True,
-    )
+    train_loader = DataLoader(train_ds, batch_size=config.batch_size, shuffle=True,
+                              num_workers=config.num_workers, pin_memory=True)
+    val_loader   = DataLoader(val_ds,   batch_size=config.batch_size, shuffle=False,
+                              num_workers=config.num_workers, pin_memory=True)
 
-    # Training loop
-    for epoch in range(config.num_epochs):
-        pbar = tqdm(train_loader, desc=f"Epoch[{epoch}/{config.num_epochs}]")
-        for input_img, label_img in pbar:
-            input_img, label_img = input_img.to(device), label_img.to(device)
+    # 迭代
+    for epoch in range(1, config.num_epochs+1):
+        model.train()
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{config.num_epochs}")
+        for inp, gt in pbar:
+            inp, gt = inp.to(device), gt.to(device)
 
             optimizer.zero_grad()
-            generate_img, edge_map = model(input_img)
-            # Compute losses
-            img_loss = criterion(generate_img, label_img)
-            edge_target = edge_detector(label_img)
-            edge_loss = criterion(edge_map, edge_target)
-            if config.train_mode == 'P-S':
-                loss = img_loss + weight * edge_loss
-            elif config.train_mode == 'P-A':
-                # 一次性计算并合并边缘 & 像素损失，然后一次 backward
-                edge_target = edge_detector(label_img)
-                edge_loss = criterion(edge_map, edge_target)
-                img_loss = criterion(generate_img, label_img)
-                loss = img_loss + edge_loss
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-                scheduler.step()
+            pred, edge_map = model(inp)
+            # 全尺度图像损失
+            img_loss = criterion(pred, gt)
+
+            # 多尺度边缘损失
+            # 全分辨率
+            edge_full = criterion(edge_map, edge_detector(gt))
+            # 半分辨率
+            gt_h = F.interpolate(gt, scale_factor=0.5, mode='bilinear', align_corners=False)
+            em_h = F.interpolate(edge_map, size=gt_h.shape[2:], mode='bilinear', align_corners=False)
+            edge_h = criterion(em_h, edge_detector(gt_h))
+            # 四分之一分辨率
+            gt_q = F.interpolate(gt, scale_factor=0.25, mode='bilinear', align_corners=False)
+            em_q = F.interpolate(edge_map, size=gt_q.shape[2:], mode='bilinear', align_corners=False)
+            edge_q = criterion(em_q, edge_detector(gt_q))
+
+            edge_loss = edge_full + 0.5 * edge_h + 0.25 * edge_q
+
+            # 总损失
+            if config.train_mode in ['P-S','P-A']:
+                loss = img_loss + config.edge_weight * edge_loss
             else:
                 loss = img_loss
-                loss.backward()
-                optimizer.step()
-                scheduler.step()
 
+            loss.backward()
+            optimizer.step()
             pbar.set_postfix(loss=f"{loss.item():.4f}")
 
-        # Save checkpoint
-        if (epoch + 1) % config.snapshot_freq == 0:
+        scheduler.step()
+
+        # 验证
+        model.eval()
+        psnr_vals = []
+        with torch.no_grad():
+            for inp, gt in val_loader:
+                inp, gt = inp.to(device), gt.to(device)
+                pred, _ = model(inp)
+                for b in range(pred.size(0)):
+                    pr = pred[b].cpu().permute(1,2,0).numpy()
+                    gr = gt[b].cpu().permute(1,2,0).numpy()
+                    psnr_vals.append(10 * np.log10(1.0 / ((pr-gr)**2).mean()))
+        print(f"[Epoch {epoch}] Val PSNR: {np.mean(psnr_vals):.2f} dB")
+
+        # 保存
+        if epoch % config.snapshot_freq == 0:
             os.makedirs(config.snapshots_folder, exist_ok=True)
-            path = os.path.join(config.snapshots_folder, f"model_epoch_{epoch+1}.ckpt")
+            path = os.path.join(config.snapshots_folder, f"model_epoch_{epoch}.ckpt")
             torch.save(model.state_dict(), path)
+            print("Saved:", path)
+
+    print("Training complete.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--input_images_path', type=str,
-                    default="./dataset/train/input/",
-                    help='path of input images')
-    parser.add_argument('--label_images_path', type=str,
-                    default="./dataset/train/label/",
-                    help='path of label images')
+    # 路径
+    parser.add_argument('--input_images_path', type=str, default='./dataset/train/input/')
+    parser.add_argument('--label_images_path', type=str, default='./dataset/train/label/')
+    parser.add_argument('--val_input_path',   type=str, default='./dataset/val/input/')
+    parser.add_argument('--val_label_path',   type=str, default='./dataset/val/label/')
+    # 超参
+    parser.add_argument('--lr',           type=float, default=2e-4)
+    parser.add_argument('--decay_rate',   type=float, default=0.8)
+    parser.add_argument('--step_size',    type=int,   default=50)
+    parser.add_argument('--num_epochs',   type=int,   default=500)
+    parser.add_argument('--loss_type',    type=str,   default='MSE', choices=['MSE','L1'])
+    parser.add_argument('--train_mode',   type=str,   default='P-A', choices=['N','P-S','P-A'])
+    parser.add_argument('--edge_weight',  type=float, default=1.2)
+    # 其它
+    parser.add_argument('--batch_size',      type=int, default=8)
+    parser.add_argument('--resize',          type=int, default=256)
+    parser.add_argument('--cuda_id',         type=int, default=0)
+    parser.add_argument('--snapshot_freq',   type=int, default=50)
+    parser.add_argument('--snapshots_folder',type=str, default='./snapshots/')
+    parser.add_argument('--num_workers',     type=int, default=16)
+    parser.add_argument('--smoke_test',      action='store_true')
+    parser.add_argument('--smoke_size',      type=int, default=500)
 
-    parser.add_argument('--lr', type=float, default=0.0002)
-    parser.add_argument('--decay_rate', type=float, default=0.7)
-    parser.add_argument('--step_size', type=int, default=400)
-    parser.add_argument('--loss_type', type=str, default="MSE")
-    parser.add_argument('--num_epochs', type=int, default=2000)
-    parser.add_argument('--train_mode', type=str, default="P-A",
-                        help='"N", "P-S" or "P-A"')
-    parser.add_argument('--batch_size', type=int, default=1)
-    parser.add_argument('--resize', type=int, default=256)
-    parser.add_argument('--cuda_id', type=int, default=0)
-    parser.add_argument('--print_freq', type=int, default=1)
-    parser.add_argument('--snapshot_freq', type=int, default=50)
-    parser.add_argument('--snapshots_folder', type=str, default="./snapshots/")
-    parser.add_argument('--edge_weight', type=float, default=1.0)
-    parser.add_argument('--num_workers', type=int, default=4)
-    parser.add_argument('--smoke_test', action='store_true',
-                        help='run quick smoke test on small subset')
-    parser.add_argument('--smoke_size', type=int, default=500,
-                        help='subset size in smoke test')
     config = parser.parse_args()
     train(config)
-
